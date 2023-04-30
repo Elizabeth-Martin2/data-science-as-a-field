@@ -1,0 +1,412 @@
+---
+title: "Covid-19 Analysis"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    toc: true
+    theme: united
+---
+
+## Introduction
+
+In this project I will be analyzing the COVID-19 Data Repository by the Center for Systems Science and Engineering (CSSE) datasets by Johns Hopkins University ([github](https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series)).  These datasets are extremely large, so for the majority of my analyses I will be focusing on the deaths caused by Covid-19.  I plan to analyze the both the global datasets as well as the United States dataset and see the total deaths as well as the deaths per thousand people.  Finally, I will build a model to show the rate of deaths throughout the dataset so we can analyze the peaks. 
+
+My project is divided into the following steps: Gathering, Transforming, Analyses & Visualizations, Models, and Conclusion.
+
+## Prerequisites
+```{r setupEnvironment, message=FALSE}
+
+# # Note: Uncomment these lines to install all required packages
+# # -------------------------------------------------------------------------------------------------
+# my_packages <- c("devtools","dplyr","gapminder","ggrepel","ggthemes","knitr","lubridate","mapdata",
+#                  "mapproj","maps","readr","stringr","tidyverse","viridis","viridisLite")
+# 
+# install.packages(my_packages, repos = "http://cran.rstudio.com")
+
+library("devtools")
+library("dplyr")
+library("gapminder")
+library("ggrepel")
+library("ggthemes")
+library("knitr")
+library("lubridate")
+library("mapdata")
+library("mapproj")
+library("maps")
+library("readr")
+library("stringr")
+library("tidyverse")
+library("viridis")
+library("viridisLite")
+
+```
+  
+## Gathering
+There are several datasets to gather, first build the URLs, then read them in.
+```{r getData, echo = TRUE}
+url_in <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/"
+
+file_names = c("time_series_covid19_confirmed_global.csv", "time_series_covid19_deaths_global.csv", "time_series_covid19_confirmed_US.csv", "time_series_covid19_deaths_US.csv")
+
+urls <- stringr::str_c(url_in, file_names)
+```
+
+```{r readData, echo = TRUE, message = FALSE}
+global_cases <- readr::read_csv(urls[1])
+global_deaths <- readr::read_csv(urls[2])
+US_cases <- readr::read_csv(urls[3])
+US_deaths <- readr::read_csv(urls[4])
+```
+
+## Transforming
+The data isn't in a very useful format right now, it has a column for every date which gets out of control quickly.  I will use the pivot command to change the columns into rows to fix this.
+```{r transform, echo = TRUE}
+global_cases = global_cases %>%
+  pivot_longer(cols = -c('Province/State',
+                         'Country/Region',
+                         Lat,
+                         Long),
+               names_to = "date",
+               values_to = "cases")
+
+global_deaths = global_deaths %>%
+  pivot_longer(cols = -c('Province/State',
+                         'Country/Region',
+                         Lat,
+                         Long),
+               names_to = "date",
+               values_to = "deaths")
+  
+US_cases = US_cases %>%
+  pivot_longer(cols = -(UID:Combined_Key),
+               names_to = "date",
+               values_to = "cases") %>%
+  dplyr::select(Admin2:cases) %>%
+  mutate(date = mdy(date)) 
+
+US_deaths = US_deaths %>%
+  pivot_longer(cols = -(UID:Population),
+               names_to = "date",
+               values_to = "deaths") %>%
+  dplyr::select(Admin2:deaths) %>%
+  mutate(date = mdy(date)) 
+
+```
+
+## Analyses & Visualizations
+### Global
+I would like to first analyze the number of deaths caused by Covid around the world.  It is important to note that the count of deaths is a running count, so I will select the max date from the dataset (the last day) and use the numbers from there.
+```{r global_deaths}
+sum_global_deaths <- global_deaths %>% 
+  filter(date == max(date)) %>%
+  group_by(`Country/Region`) %>%
+  summarize(total_deaths = sum(deaths)) %>%
+  arrange(desc(total_deaths))
+
+# To build the map later, we'll need to rename the "US" row to "USA" so it matches the maps dataset
+sum_global_deaths[sum_global_deaths == "US"] <- "USA"
+
+```
+
+The map_data() has the coordinates for countries around the world.  I'll join that with the sum_global_deaths so we can map it.
+```{r joining_for_global_map, echo=TRUE, results="hide", message=FALSE}
+
+countries <- map_data("world")
+
+# Create a new column titled 'region' with the same data as 'Country/Region' so that we can join it with the maps dataset
+sum_global_deaths$region <-sum_global_deaths$`Country/Region`
+global_covid <- left_join(countries, sum_global_deaths)
+
+```
+
+```{r global_map, warning=FALSE, fig.width=10}
+
+ggplot(data = global_covid,
+       mapping = aes(x = long, y = lat, group = group, fill = total_deaths)) +
+       geom_polygon(color = "black", size = 0.1) +
+       labs(title = "Global Covid Deaths", fill = NULL) +
+       scale_fill_viridis() + 
+       theme_map()
+
+```
+
+This maps shows the number of deaths throughout the world due to Covid.  You'll notice right away the grayed out countries, these are ones that we don't have any data for.  The US jumps out as the highest, but being a highly populated country, that might be an unfair representation.  It would be best to do some more calculations and refer to a map that shows the deaths in the country per capita (I will actually show deaths per thousand people to make it a bit more relatable).
+
+```{r global_population, message=FALSE}
+
+# The global dataset doesn't come with population so we need to get it ourselves
+# The latest year the gapminder dataset has is from 2007
+# **Note** sometimes this command bugs out, you just need to rerun library("gapminder")
+global_population <- gapminder %>%
+  filter(year == 2007) %>%
+  select(country, pop) %>%
+  rename('Country/Region'='country')
+
+# Convert Country/Region to character instead of factor
+global_population$`Country/Region` <- as.character(global_population$`Country/Region`)
+# Rename United States to USA so it matches in the join
+global_population[global_population == 'United States'] <- "USA"
+
+joined_global_population <- left_join(sum_global_deaths, global_population)
+
+# Still missing some years, remove rows w/pop == NA so we can do the division
+joined_global_population <- joined_global_population %>%
+  filter(pop != "NA") %>%
+  arrange(desc(total_deaths))
+
+```
+
+Calcuate the deaths per capita, then join the dataset with countries so we can map it again.
+```{r global_percapita, message=FALSE}
+global_deaths_percap <- joined_global_population %>%
+  mutate(deaths_percap = total_deaths / pop)
+
+global_map_percap <- left_join(countries, global_deaths_percap)
+
+```
+
+```{r global_percapita_map, fig.width=10}
+# Note: Multiplying by 1000 so the numbers more relatable
+ggplot(data = global_map_percap,
+       mapping = aes(x = long, y = lat, group = group, fill = deaths_percap * 1000)) +
+       geom_polygon(color = "black", size = 0.1) +
+       labs(title = "Global Covid Deaths per Thousand People", fill = NULL) +
+       scale_fill_viridis() +
+       theme_map()
+
+```
+
+You'll notice there are even more countries grayed out this time since the gapminder dataset didn't have the population data for them.  However, we can see that other countries have gone down in their severity, and as an example the US has approximately 4 deaths per 1000 people.  With this map we can get a good understanding of how well each country handled the Covid19 crisis.  See the below tables for the countries that handled Covid19 the worst & the best (according to this dataset), respectively.
+
+```{r global_best_and_worst}
+top_global <- global_map_percap %>%
+  filter(deaths_percap != 0) %>%
+  mutate(deaths_percapita = (deaths_percap*1000)) %>%
+  mutate("Deaths per Thousand People" = deaths_percapita) %>%
+  select('Country/Region', 'Deaths per Thousand People') %>%
+  arrange(desc('Deaths per Thousand People')) %>%
+  distinct()
+
+# Shows the countries that handled Covid19 the worst
+kable(head(top_global, n=5), caption = "Countries that handled Covid19 the worst")
+
+# Shows the countries that handled Covid19 the best
+kable(head(top_global %>% arrange('Deaths per Thousand People'), n=5), caption = "Countries that handled Covid19 the best")
+```
+
+---
+
+### United States
+Next, I'd like to perform the same calculations for the United States.  I'll start the same way and see the number of deaths per state.
+```{r deaths_by_state}
+# Select the last day of the dataset, group by state, & sum the total deaths
+us_deaths_by_state <- US_deaths %>%
+  filter(date == max(date)) %>%
+  group_by(Province_State) %>%
+  summarize(total_deaths = sum(deaths)) %>%
+  arrange(desc(total_deaths))
+
+```
+
+```{r join_map_totaldeaths, echo=TRUE, results="hide", message=FALSE}
+# The map_data() also has coordinates for all the states
+us_states <- map_data("state")
+
+# Create a new column titled region with the lowercase state names to match the map dataset
+(us_deaths_by_state$region <- tolower(us_deaths_by_state$Province_State))
+
+(us_states_covid <- left_join(us_states, us_deaths_by_state))
+
+```
+
+```{r map_total_deaths, warning=FALSE, fig.width=10}
+ggplot(data = us_states_covid,
+       mapping = aes(x = long, y = lat, group = group, fill = total_deaths)) + 
+       geom_polygon(color = "black", size = 0.1) +
+       coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+       labs(title = "Covid Deaths in the US", fill = NULL) +
+       scale_fill_viridis() +
+       theme_map() 
+```
+
+This map shows the total number of deaths in each state of the United States. Texas, California, & Florida appear to be among the highest numbers, let's calculate the deaths per capita and see the difference.
+
+```{r percapita, echo=TRUE, results="hide", message=FALSE}
+population <- US_deaths %>%
+  filter(date == max(date)) %>%
+  group_by(Province_State) %>%
+  summarize(pop = sum(Population))
+
+us_deaths_percap <- left_join(population, us_deaths_by_state) %>%
+  mutate(deaths_percap = total_deaths / pop)
+
+# Join per capita calculations with the map data
+(us_states_map_percap <- left_join(us_states, us_deaths_percap)) 
+
+```
+
+```{r percapita_map, fig.width=10}
+# Note: Multiplying by 1000 to make the numbers more relatable
+ggplot(data = us_states_map_percap,
+       mapping = aes(x = long, y = lat, group = group, fill = deaths_percap * 1000)) +
+       geom_polygon(color = "gray90", size = 0.1) +
+       coord_map(projection = "albers", lat0 = 39, lat1 = 45) +
+       labs(title = "COVID Deaths per Thousand People in the US", fill = NULL) +
+       scale_fill_viridis() +
+       theme_map()
+```
+
+The map has changed drastically from the previous one, putting Arizona, Oklahoma, Mississippi, and West Virginia as the highest.  See the below tables for the highest and lowest deaths per thousand people (multiplying by 1000 to make it a bit more relatable) respectively.
+
+```{r us_best_and_worst}
+top <- us_states_map_percap %>%
+  mutate(deaths_percapita = (deaths_percap*1000)) %>%
+  mutate("Deaths per Thousand People" = deaths_percapita) %>%
+  mutate("State" = Province_State) %>%
+  select("State", "Deaths per Thousand People") %>%
+  arrange(desc("Deaths per Thousand People")) %>%
+  distinct()
+
+# Shows the states that handled Covid19 the worst
+kable(head(top, n=5), caption = "States that handled Covid19 the worst")
+
+# Shows the states that handled Covid19 the best
+kable(head(top %>% arrange("Deaths per Thousand People"), n=5), caption = "States that handled Covid19 the best")
+```
+
+---
+
+## Models
+
+For my models, I will analyze the rate of deaths per thousand people throughout the dataset for the top countries & states as previously shown the above sections.
+
+### Global
+
+```{r global_deaths_percapita_model, fig.width=10, message=FALSE}
+# Correct the date column to be the date type
+global_deaths <- global_deaths %>% mutate(date = mdy(date))
+
+global_model_deaths <- global_deaths %>%
+  group_by(`Country/Region`, date) %>%
+  summarize(total_deaths = sum(deaths))
+
+global_model_deaths_percap <- left_join(global_model_deaths, global_population) %>%
+  filter(`Country/Region` %in% c("Peru", "Bulgaria", "Hungary", "Montenegro", "Croatia", "Chad", "China", "Burundi", "Benin", "Sierra Leone")) %>%
+  mutate(Difference = total_deaths - lag(total_deaths)) %>%
+  filter(Difference >= 0) %>%
+  mutate(deaths_percap = (Difference / pop)*1000)
+
+ggplot(data = global_model_deaths_percap) +
+  geom_smooth(mapping = aes(x = date, y = deaths_percap, group = `Country/Region`, color = `Country/Region`), se=FALSE) +
+  labs(title = "Global Covid Deaths per Thousand People", subtitle = "Similar peaks to flu season", x = "Date", y = "Deaths per Thousand People", color='Country') +
+  theme_clean()
+
+```
+
+I have shown only the countries that the dataset reported as the best and worst at handling Covid (see previous tables above for reference) and the curves are about what we would expect closely following the flu season and getting smaller as time goes on and more people are vaccinated.  There are a few countries reporting deaths per thousand to be very close to 0.  This could be incorrect data, or potentially true as the majority of these countries have very small populations compared to the others in the chart. 
+
+```{r review_populations}
+
+kable(global_population %>%
+  filter(`Country/Region` %in% c("Peru", "Bulgaria", "Hungary", "Montenegro", "Croatia", "Chad", "China", "Burundi", "Benin", "Sierra Leone")) %>%
+  mutate("Population" = pop) %>%
+  select(`Country/Region`, "Population") %>%
+  arrange(`Population`))
+
+```
+
+There is only one oddity, which is China.  Being a heavily populated country, it is unexpected that they recorded such a small number of deaths per thousand people.  Let's dig into that a bit more here.
+
+```{r zoom_in_on_China, message=FALSE}
+# I already modified the calculations in the model by multiplying by 1000, so this will be 1,000 * 1,000,000 = 1,000,000,000
+china_deaths_percap = global_model_deaths_percap %>%
+  filter(`Country/Region` == "China") %>%
+  summarize(`Average per Billion` = mean(deaths_percap * 1000000))
+
+china_specific = left_join(china_deaths_percap, global_population)
+kable(china_specific %>% 
+  mutate("Population" = pop) %>%
+  select(`Country/Region`, `Average per Billion`, `Population`))
+```
+
+I have again enhanced the numbers in this calculation to make them easier to grasp.  Combining with the previous calculations, this shows that there was an average of 67.36 deaths per billion people in China (a country that had a population of 1.3 billion in 2007 (from gapminder dataset)).  This gives us a better idea of the numbers compared to the model above. 
+
+---
+
+### United States
+
+
+```{r us_deaths_percapita_model, fig.width=10, message=FALSE}
+us_model_deaths <- US_deaths %>%
+  group_by(Province_State, date) %>%
+  summarize(total_deaths = sum(deaths))
+
+us_model_deaths_percap <- left_join(population, us_model_deaths) %>%
+  filter(Province_State %in% c("Arizona", "Oklahoma", "Mississippi", "West Virginia", "New Mexico", "Arkansas", "Vermont", "Utah", "District of Columbia", "Washington", "Maine, New Hampshire")) %>%
+  mutate(Difference = total_deaths - lag(total_deaths))%>%
+  filter(Difference >= 0) %>%
+  mutate(deaths_percap = (Difference / pop)*1000)
+
+ggplot(data = us_model_deaths_percap) +
+  geom_smooth(mapping = aes(x = date, y = deaths_percap, group = Province_State, color = Province_State), se=FALSE) + 
+  labs(title = "Covid Deaths per Thousand People in the US", subtitle = "Similar peaks to flu season", x = "Date", y = "Deaths per Thousand People", color='State') +
+  theme_clean()
+
+```
+
+Similar to the global model, I have selected the top 10 states that handled Covid the best and worst according to the dataset.  It's interesting to see the similarities to the flu season in both of these models and again the curves going down as more people become vaccinated. The only odd one out here would be Oklahoma that has more of a parabolic curve.  As a reference, I have also included the populations of the selected states below.
+
+```{r state_population}
+
+kable(population %>%
+  filter(Province_State %in% c("Arizona", "Oklahoma", "Mississippi", "West Virginia", "New Mexico", "Arkansas", "Vermont", "Utah", "District of Columbia", "Washington", "Maine, New Hampshire")) %>%
+  mutate("Population" = pop, "State" = `Province_State`) %>%
+  select(State, Population) %>%
+  arrange(`Population`))
+
+```
+
+
+---
+
+## Conclusion
+I found these datasets very interesting to work with, and I especially enjoyed mapping them against the map dataset.  I tried to avoid any anchor bias by looking at the deaths per capita in both the US and global datasets, as that gives us a better representation of the data.  
+
+There were probably a few biases present in the dataset, as we saw there was missing data from several countries (Greenland, Democratic Republic of the Congo, Burma, etc.).  I also had to look elsewhere for the global population data which took a couple more countries off the list.  I am a US citizen, which is why I selected the US to analyze as a part of this study, although I think it's still a very relevant selection.  There might also be some reporting or confirmation bias present, e.g., if data was gathered from police / media reports, some news stories receive more coverage than others or the people that gathered this data had biases themselves that affected the collection of the data.
+
+Thank you for your time reviewing my project
+
+-E
+
+---
+
+### Data Sources
+1. COVID-19 Data Repository by the Center for Systems Science and Engineering (CSSE) at Johns Hopkins University -  [github](https://github.com/CSSEGISandData/COVID-19/tree/master/csse_covid_19_data/csse_covid_19_time_series)
+2. Gapminder dataset for populations in 2007 (latest year available)
+3. map_data for coordinates for drawing the maps
+
+### Session Info
+```{r sessionInfo, echo=FALSE}
+sessionInfo()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
